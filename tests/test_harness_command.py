@@ -1,14 +1,146 @@
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from personal_harness.codex_agent import CodexAgentEvolver, CodexCandidateRequest
-from personal_harness.harness_command import run_codex_candidate_gate
+from personal_harness.harness_command import main, run_codex_candidate_gate
+from personal_harness.memory import HOT_MEMORY_RELATIVE_PATH
 from personal_harness.replay import ReplayStore, TrajectoryRecord
 
 
 class TestHarnessCommand(unittest.TestCase):
+    def test_command_records_flow_checkpoint_before_session_exit(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--flow-checkpoint",
+                        "--flow-id",
+                        "fix-tests",
+                        "--status",
+                        "failed",
+                        "--evidence",
+                        "pytest failed before fix",
+                        "--skill-context-json",
+                        '{"selected":"systematic-debugging"}',
+                        "--replay-ref",
+                        ".harness/replay/replay.jsonl#L1",
+                        "--candidate-ref",
+                        ".harness/candidates/codex-candidate-request.json",
+                        "--memory-category",
+                        "correction",
+                        "--memory-text",
+                        "Tests must verify runtime TODO_FILE resolution.",
+                        "--memory-source",
+                        "flow:fix-tests",
+                        "--json",
+                    ]
+                )
+
+            checkpoint = json.loads((root / ".harness" / "flow-checkpoints" / "checkpoints.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            [record] = list(ReplayStore(root / ".harness" / "replay" / "replay.jsonl").read_all())
+            state = json.loads((root / ".harness" / "state" / "personal-harness-state.json").read_text(encoding="utf-8"))
+            output = json.loads(stdout.getvalue())
+            hot = (root / HOT_MEMORY_RELATIVE_PATH).read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(checkpoint["flow_id"], "fix-tests")
+        self.assertEqual(checkpoint["status"], "failed")
+        self.assertEqual(checkpoint["memory"]["accepted"], True)
+        self.assertEqual(checkpoint["skill_context"]["selected"], "systematic-debugging")
+        self.assertEqual(record.task_id, "flow:fix-tests")
+        self.assertEqual(record.metadata["record_type"], "flow_checkpoint")
+        self.assertEqual(state["metadata"]["flow_checkpoints"][-1]["flow_id"], "fix-tests")
+        self.assertEqual(state["metadata"]["memory"]["last_sync"]["accepted"], True)
+        self.assertEqual(output["memory"]["accepted"], True)
+        self.assertIn("Tests must verify runtime TODO_FILE resolution", hot)
+
+    def test_command_can_run_memory_sync_without_checkpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--memory-sync",
+                        "--memory-category",
+                        "verified-fact",
+                        "--memory-text",
+                        "capture-on-exit is a session-exit fallback, not the flow iteration driver.",
+                        "--memory-source",
+                        "user:memory-architecture",
+                        "--json",
+                    ]
+                )
+
+            output = json.loads(stdout.getvalue())
+            hot = (root / HOT_MEMORY_RELATIVE_PATH).read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output["memory"]["accepted"], True)
+        self.assertIn("capture-on-exit is a session-exit fallback", hot)
+
+    def test_command_flow_checkpoint_without_memory_does_not_create_memory_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            with redirect_stdout(StringIO()):
+                exit_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--flow-checkpoint",
+                        "--flow-id",
+                        "no-memory",
+                        "--status",
+                        "complete",
+                        "--evidence",
+                        "checkpoint only",
+                        "--json",
+                    ]
+                )
+
+            checkpoint = json.loads((root / ".harness" / "flow-checkpoints" / "checkpoints.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            memory_exists = (root / ".harness" / "memory").exists()
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("memory", checkpoint)
+        self.assertFalse(memory_exists)
+
+    def test_command_rejects_invalid_flow_checkpoint_skill_context(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stderr = StringIO()
+
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "--root",
+                        str(root),
+                        "--flow-checkpoint",
+                        "--flow-id",
+                        "bad-json",
+                        "--evidence",
+                        "invalid skill context",
+                        "--skill-context-json",
+                        "[1]",
+                    ]
+                )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--skill-context-json must be a JSON object", stderr.getvalue())
+
     def test_command_reads_request_generates_response_and_runs_gate(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

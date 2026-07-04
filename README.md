@@ -10,6 +10,8 @@
 
 這份 repo 的目標不是完整複製 HarnessX 論文，而是做出可在本機持續擴充、具備自我除錯與自我演化能力的「harness-coding agent」。
 
+目前 production package 版號：`1.0.0`。四個全域 CLI 入口是 `harness-codex`、`harness-agent`、`harness-status`、`harness-capture-codex`。
+
 ## 目前模組
 
 ```text
@@ -254,6 +256,26 @@ capture-on-exit 失敗不會覆蓋 Codex 的 exit code；錯誤會寫入 `.harne
 scripts/harness-codex --root .
 ```
 
+開發 repo 內可直接用 `scripts/...`；提供給其他 repo 或其他使用者時，應安裝成全域 CLI：
+
+```bash
+python3 -m pip install .
+
+harness-codex --root .
+harness-agent --help
+harness-status --root .
+harness-capture-codex --help
+```
+
+安裝後的 `harness-codex` 不依賴開發機上的 source repo `scripts/...` 路徑。工具可以從任意 target repo 執行，runtime 只寫在該 target repo 的 `.harness/`。
+
+真正啟動 Codex 前，`harness-codex` 會先把目標資料夾準備成 coding repo：
+
+- 若 `--root` 不存在，會建立資料夾。
+- 若該資料夾沒有自己的 git repo，會執行 `git init -q`；不會沿用上層 home/Desktop repo。
+- 若沒有 `AGENTS.md`，會建立 repo-local `AGENTS.md`，寫入 repo boundary、`.harness` memory/replay ownership、flow checkpoint policy、dynamic skill-routing guidance、non-destructive rollback policy。
+- 既有 git repo 和既有 `AGENTS.md` 不會被覆蓋。
+
 預設會啟動：
 
 ```bash
@@ -344,7 +366,75 @@ git:no-repo
 
 Codex 結束後，`harness-codex` 會 kill HUD pane，並還原 tmux window 設定；若有設定 `HARNESS_TMUX_STATUS_LEFT=1`，也會還原原本的 tmux footer。
 
-Codex 結束後，`harness-codex` 也會預設 capture 這次 session 的 execution transcript，寫入 `.harness/replay/replay.jsonl` 與 `.harness/state/`。這個 capture 會被綁在本次 launch 的 `started_at` 與 repo cwd，不會跨專案吃到其他 cwd 的 session log；成功後會在 state 裡保留解析出的 Codex `session_id`。若不需要這次回灌：
+Codex 結束後，`harness-codex` 也會預設 capture 這次 session 的 execution transcript，寫入 `.harness/replay/replay.jsonl` 與 `.harness/state/`。這個 capture 會被綁在本次 launch 的 `started_at` 與 repo cwd，不會跨專案吃到其他 cwd 的 session log；成功後會在 state 裡保留解析出的 Codex `session_id`。這是最終 fallback，不是唯一迭代點。
+
+`harness-codex` 也會預設自動記錄 lifecycle checkpoint，不需要使用者手動執行 checkpoint：
+
+- session 開始：`harness-codex-session-started`
+- Codex exit code `0`：`harness-codex-session-complete`
+- Codex exit code 非 `0`：`harness-codex-session-failed`
+
+這些 checkpoint 會寫入 `.harness/flow-checkpoints/checkpoints.jsonl`，並同步 append 到 `.harness/replay/replay.jsonl`。若是測試或特殊執行不想寫自動 checkpoint：
+
+```bash
+harness-codex --root . --no-auto-checkpoint
+```
+
+長 session 中每完成一個大流程，Codex agent 或 hook 可以在不關閉 Codex 的情況下呼叫底層 primitive 先記錄 checkpoint；這不是要求使用者手動操作，而是提供給 agent workflow 自動呼叫：
+
+```bash
+harness-agent --root . \
+  --flow-checkpoint \
+  --flow-id fix-tests \
+  --status failed \
+  --evidence "pytest failed before fix" \
+  --skill-context-json '{"selected":"systematic-debugging"}' \
+  --memory-category correction \
+  --memory-text "Tests must verify runtime TODO_FILE resolution." \
+  --memory-source "flow:fix-tests" \
+  --replay-ref '.harness/replay/replay.jsonl#L12' \
+  --candidate-ref '.harness/candidates/codex-candidate-request.json' \
+  --json
+```
+
+checkpoint-driven memory 由 `harness-agent` 驅動；只有明確提供 memory 欄位時才會新增記憶。允許記的類別只有四種：
+
+- `decision`：拍板決策，例如這個 repo 的主入口固定用 `harness-codex`。
+- `correction`：踩雷或修正，例如環境變數必須 runtime 讀取，不能 import time 固定。
+- `milestone`：交付或驗證里程碑。
+- `verified-fact`：查證後確定的硬結論。
+
+memory 會分層寫入：
+
+```text
+.harness/memory/hot.md      # 最近 7 天，最多 20 條，預設優先參考
+.harness/memory/warm.md     # 8~30 天，用到才查
+.harness/memory/archive.md  # 30 天以上，冷層歷史
+```
+
+`harness-agent` 會在 checkpoint 後自動輪轉這三層；不需要使用者手動搬記憶。若只要輪轉或手動寫一條 verified memory，也可以不建立 checkpoint：
+
+```bash
+harness-agent --root . \
+  --memory-sync \
+  --memory-category verified-fact \
+  --memory-text "capture-on-exit is a session-exit fallback, not the flow iteration driver." \
+  --memory-source "user:memory-architecture" \
+  --json
+```
+
+不應寫進 memory 的內容：整份 transcript、長 log、純操作步驟、未拍板討論、猜測、secret/token/.env/API key、個資。
+
+flow checkpoint 會寫入：
+
+```text
+.harness/flow-checkpoints/checkpoints.jsonl
+.harness/replay/replay.jsonl
+.harness/state/personal-harness-state.json
+.harness/memory/hot.md                      # 只有提供 memory 欄位且通過篩選時才新增記憶
+```
+
+checkpoint 預設只記錄 evidence、status、git summary、可選 `git diff --stat`、skill/routing context、replay/candidate refs；只有提供 memory 欄位且通過篩選時才會寫入 `.harness/memory/`。預設不執行 `git reset`、`git checkout` 或 `git clean`。若不需要 Codex 結束時回灌：
 
 ```bash
 scripts/harness-codex --root . --no-capture-on-exit
@@ -360,6 +450,8 @@ scripts/harness-codex --root . --quiet-status
 
 ```text
 .harness/state/personal-harness-state.json
+.harness/flow-checkpoints/checkpoints.jsonl  # 只有記錄大流程 checkpoint 後才會出現
+.harness/replay/replay.jsonl                 # checkpoint 或 session capture 後出現
 ```
 
 並標記：
@@ -456,7 +548,7 @@ python3 -m compileall personal_harness tests
 - execution controller 已支援 transcript-based 閉環；尚未接入真實 Codex model/tool event hook 自動捕捉。
 - LLM candidate generator 已定義為目前 Codex agent 的檔案 handoff；尚未做自動互動式觸發。
 - 尚未做真正 GRPO / model fine-tuning。
-- 尚未包裝成正式套件或全域安裝型 CLI；目前入口是 `scripts/harness-codex`、`scripts/harness-agent`、`scripts/harness-status`。
+- 全域 CLI 已可用；尚未補 release/package 發佈流程與版本升級策略。
 - variant routing 尚未和 AEGIS candidate fork 自動連動。
 
 這些會是下一階段擴充點。

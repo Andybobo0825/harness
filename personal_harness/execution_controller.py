@@ -184,7 +184,7 @@ class AgentExecutionController:
 
     def _is_solved(self, execution: AgentExecution) -> bool:
         tool_exit_codes = self._tool_exit_codes(execution)
-        verification_exit_codes = self._verification_exit_codes(execution)
+        verification_exit_codes = self._latest_verification_exit_codes(execution)
         if not verification_exit_codes:
             return False
         tools_ok = all(exit_code == 0 for exit_code in tool_exit_codes)
@@ -193,7 +193,7 @@ class AgentExecutionController:
 
     def _classify_failure(self, execution: AgentExecution) -> str:
         tool_exit_codes = self._tool_exit_codes(execution)
-        verification_exit_codes = self._verification_exit_codes(execution)
+        verification_exit_codes = self._latest_verification_exit_codes(execution)
         if any(exit_code != 0 for exit_code in tool_exit_codes):
             return "tool"
         if not verification_exit_codes:
@@ -241,17 +241,29 @@ class AgentExecutionController:
         return f"controller:{self.harness_version}:{execution.task_id}:{failure_category}:{uuid4().hex}"
 
     def _tool_exit_codes(self, execution: AgentExecution) -> List[int]:
-        exit_codes = [result.exit_code for result in execution.tool_calls]
+        exit_codes = [result.exit_code for result in execution.tool_calls if not result.metadata.get("is_verification")]
         for event in execution.events:
             if event.event_type == "tool_call" and "exit_code" in event.payload:
                 exit_codes.append(int(event.payload["exit_code"]))
         return exit_codes
 
-    def _verification_exit_codes(self, execution: AgentExecution) -> List[int]:
-        exit_codes = [result.exit_code for result in execution.verification_results]
+    def _latest_verification_exit_codes(self, execution: AgentExecution) -> List[int]:
+        latest_by_command: dict[str, int] = {}
+        for result in execution.verification_results:
+            latest_by_command[result.command] = int(result.exit_code)
+        if latest_by_command:
+            return list(latest_by_command.values())
+
+        exit_codes: List[int] = []
         for event in execution.events:
             if event.event_type == "verification_result" and "exit_code" in event.payload:
-                exit_codes.append(int(event.payload["exit_code"]))
+                command = str(event.payload.get("command", ""))
+                if command:
+                    latest_by_command[command] = int(event.payload["exit_code"])
+                else:
+                    exit_codes.append(int(event.payload["exit_code"]))
+        if latest_by_command:
+            exit_codes.extend(latest_by_command.values())
         return exit_codes
 
     def _write_state(

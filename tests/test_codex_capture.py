@@ -280,6 +280,70 @@ class TestCodexCapture(unittest.TestCase):
         self.assertEqual(record.metadata["execution_metadata"]["source"], "codex_session_jsonl")
         self.assertEqual(record.events[-1]["type"], "verification_result")
 
+    def test_tdd_red_then_green_verification_records_solved_execution(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            session_path = root / "session.jsonl"
+            command = "python3 -m unittest -v"
+            _write_jsonl(
+                session_path,
+                [
+                    {"type": "session_meta", "payload": {"id": "sess-red-green"}},
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": "call-red",
+                            "name": "functions.exec_command",
+                            "arguments": json.dumps({"cmd": command}),
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-red",
+                            "output": "FAILED (errors=1)\nProcess exited with code 1",
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": "call-green",
+                            "name": "functions.exec_command",
+                            "arguments": json.dumps({"cmd": command}),
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-green",
+                            "output": "Ran 1 test\n\nOK\nProcess exited with code 0",
+                        },
+                    },
+                ],
+            )
+
+            execution = agent_execution_from_codex_session(session_path, task_id="red-green")
+            outcome = record_codex_session(
+                root,
+                session_path,
+                harness_version="v1",
+                model_version="model-v1",
+                task_id="red-green",
+            )
+
+            [record] = list(ReplayStore(root / ".harness" / "replay" / "replay.jsonl").read_all())
+            candidate_request_exists = (root / ".harness" / "candidates" / "codex-candidate-request.json").exists()
+
+        self.assertEqual([result.exit_code for result in execution.verification_results], [1, 0])
+        self.assertTrue(outcome.solved)
+        self.assertEqual(outcome.stage, "task_complete")
+        self.assertFalse(candidate_request_exists)
+        self.assertTrue(record.solved)
+
     def test_finds_latest_session_for_relative_cwd(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

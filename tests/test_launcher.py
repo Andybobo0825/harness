@@ -2,7 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -80,6 +80,14 @@ def _write_codex_session(
     )
 
 
+def _agent_execution_records(root: Path):
+    return [
+        record
+        for record in ReplayStore(root / ".harness" / "replay" / "replay.jsonl").read_all()
+        if record.metadata.get("record_type") == "agent_execution"
+    ]
+
+
 class TestHarnessLauncher(unittest.TestCase):
     def test_build_codex_command_defaults_to_gpt55_high_yolo(self):
         command = build_codex_command(Path("/repo"), prompt_args=["修測試"])
@@ -110,6 +118,21 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertFalse(closed["active"])
         self.assertEqual(closed["phase"], "closed")
         self.assertEqual(closed["metadata"]["exit_code"], 0)
+
+    def test_session_lifecycle_preserves_malformed_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            state_path = root / ".harness" / "state" / "personal-harness-state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("{not-json", encoding="utf-8")
+
+            with self.assertRaises(json.JSONDecodeError):
+                mark_harness_session_started(root, model="gpt-5.5", reasoning="high", yolo=True)
+            with self.assertRaises(json.JSONDecodeError):
+                close_harness_session(root, exit_code=0)
+            state_text = state_path.read_text(encoding="utf-8")
+
+        self.assertEqual(state_text, "{not-json")
 
     def test_status_mentions_harness_model_reasoning_and_yolo(self):
         with tempfile.TemporaryDirectory() as d:
@@ -220,6 +243,166 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertEqual(seen["state_during_run"]["metadata"]["status"]["mode"], "inline")
         self.assertEqual(final_state["phase"], "closed")
 
+    def test_harness_codex_prepares_fresh_repo_for_coding(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "new-repo"
+            seen = {}
+
+            def fake_runner(command):
+                seen["command"] = command
+                return subprocess.CompletedProcess(command, 0)
+
+            exit_code = run_harness_codex(
+                ["--root", str(root), "--no-tmux-status", "--quiet-status", "--no-capture-on-exit", "--", "hello"],
+                runner=fake_runner,
+            )
+
+            git_root = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            ).stdout.strip()
+            state_path = root / ".harness" / "state" / "personal-harness-state.json"
+            root_exists = root.exists()
+            agents_exists = (root / "AGENTS.md").exists()
+            agents_text = (root / "AGENTS.md").read_text(encoding="utf-8")
+            state_exists = state_path.exists()
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(root_exists)
+        self.assertEqual(Path(git_root).resolve(), root.resolve())
+        self.assertTrue(agents_exists)
+        self.assertTrue(state_exists)
+        self.assertEqual(seen["command"][:3], ["env", f"GIT_CEILING_DIRECTORIES={root.parent.resolve()}", "codex"])
+        self.assertIn("Repository Boundary", agents_text)
+        self.assertIn(str(root.resolve()), agents_text)
+        self.assertIn(".harness/state/personal-harness-state.json", agents_text)
+        self.assertIn(".harness/replay/replay.jsonl", agents_text)
+        self.assertIn(".harness/flow-checkpoints/checkpoints.jsonl", agents_text)
+        self.assertIn(".harness/memory/hot.md", agents_text)
+        self.assertIn(".harness/memory/warm.md", agents_text)
+        self.assertIn(".harness/memory/archive.md", agents_text)
+        self.assertIn(".harness/candidates/", agents_text)
+        self.assertIn("Do not run destructive git commands", agents_text)
+        self.assertIn("Let Codex and available skills choose the coding workflow dynamically", agents_text)
+        self.assertIn("record evidence and verification with harness flow checkpoints", agents_text)
+        self.assertIn("accepted decisions, corrections/lessons from failures, milestones, and verified facts", agents_text)
+        self.assertIn("Users should not need to record checkpoints or rotate memory manually", agents_text)
+
+    def test_harness_codex_preserves_existing_git_and_agents_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            agents_path = root / "AGENTS.md"
+            agents_path.write_text("custom repo instructions\n", encoding="utf-8")
+
+            exit_code = run_harness_codex(
+                ["--root", str(root), "--no-tmux-status", "--quiet-status", "--no-capture-on-exit", "--", "hello"],
+                runner=lambda command: subprocess.CompletedProcess(command, 0),
+            )
+
+            git_dir = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--git-dir"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            ).stdout.strip()
+            agents_text = agents_path.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(git_dir, ".git")
+        self.assertEqual(agents_text, "custom repo instructions\n")
+
+    def test_harness_codex_rejects_malformed_state_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            state_path = root / ".harness" / "state" / "personal-harness-state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("{not-json", encoding="utf-8")
+            stderr = StringIO()
+            seen = {"runner_called": False}
+
+            def fake_runner(command):
+                seen["runner_called"] = True
+                return subprocess.CompletedProcess(command, 0)
+
+            with redirect_stderr(stderr):
+                exit_code = run_harness_codex(
+                    ["--root", str(root), "--no-tmux-status", "--quiet-status", "--no-capture-on-exit", "--", "hello"],
+                    runner=fake_runner,
+                )
+            state_text = state_path.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(seen["runner_called"])
+        self.assertEqual(state_text, "{not-json")
+        self.assertIn("invalid existing harness state", stderr.getvalue())
+
+    def test_harness_codex_records_automatic_success_checkpoints(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            exit_code = run_harness_codex(
+                ["--root", str(root), "--no-tmux-status", "--quiet-status", "--no-capture-on-exit", "--", "hello"],
+                runner=lambda command: subprocess.CompletedProcess(command, 0),
+            )
+
+            checkpoint_lines = (root / ".harness" / "flow-checkpoints" / "checkpoints.jsonl").read_text(encoding="utf-8").splitlines()
+            checkpoints = [json.loads(line) for line in checkpoint_lines]
+            flow_ids = [checkpoint["flow_id"] for checkpoint in checkpoints]
+            final_state = json.loads((root / ".harness" / "state" / "personal-harness-state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(flow_ids, ["harness-codex-session-started", "harness-codex-session-complete"])
+        self.assertEqual(checkpoints[-1]["status"], "complete")
+        self.assertEqual(checkpoints[-1]["skill_context"]["orchestrator"], "harness-codex")
+        self.assertEqual(final_state["metadata"]["flow_checkpoints"][-1]["flow_id"], "harness-codex-session-complete")
+
+    def test_harness_codex_records_automatic_failed_checkpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            exit_code = run_harness_codex(
+                ["--root", str(root), "--no-tmux-status", "--quiet-status", "--no-capture-on-exit", "--", "hello"],
+                runner=lambda command: subprocess.CompletedProcess(command, 7),
+            )
+
+            checkpoints = [
+                json.loads(line)
+                for line in (root / ".harness" / "flow-checkpoints" / "checkpoints.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(exit_code, 7)
+        self.assertEqual(checkpoints[-1]["flow_id"], "harness-codex-session-failed")
+        self.assertEqual(checkpoints[-1]["status"], "failed")
+        self.assertIn("exit_code=7", checkpoints[-1]["evidence"])
+
+    def test_harness_codex_can_disable_automatic_checkpoints(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            exit_code = run_harness_codex(
+                [
+                    "--root",
+                    str(root),
+                    "--no-tmux-status",
+                    "--quiet-status",
+                    "--no-capture-on-exit",
+                    "--no-auto-checkpoint",
+                    "--",
+                    "hello",
+                ],
+                runner=lambda command: subprocess.CompletedProcess(command, 0),
+            )
+
+            checkpoint_path = root / ".harness" / "flow-checkpoints" / "checkpoints.jsonl"
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(checkpoint_path.exists())
+
     def test_harness_codex_captures_latest_session_on_exit_by_default(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -243,7 +426,7 @@ class TestHarnessLauncher(unittest.TestCase):
                 runner=fake_runner,
             )
 
-            [record] = list(ReplayStore(root / ".harness" / "replay" / "replay.jsonl").read_all())
+            [record] = _agent_execution_records(root)
             final_state = json.loads((root / ".harness" / "state" / "personal-harness-state.json").read_text(encoding="utf-8"))
 
         self.assertEqual(exit_code, 0)
@@ -288,7 +471,7 @@ class TestHarnessLauncher(unittest.TestCase):
                 runner=fake_runner,
             )
 
-            [record] = list(ReplayStore(root / ".harness" / "replay" / "replay.jsonl").read_all())
+            [record] = _agent_execution_records(root)
             final_state = json.loads((root / ".harness" / "state" / "personal-harness-state.json").read_text(encoding="utf-8"))
 
         self.assertEqual(exit_code, 0)
@@ -469,13 +652,17 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn(["show-option", "-qv", "status-left"], tmux_calls)
         self.assertTrue(any(call[:2] == ["set-option", "status-left"] and "harness-status" in call[-1] for call in tmux_calls))
+        self.assertFalse(
+            any(call[:2] == ["set-option", "status-left"] and "/scripts/harness-status" in call[-1] for call in tmux_calls)
+        )
         self.assertIn(["set-option", "status-left", "old-left"], tmux_calls)
 
-    def test_harness_status_watch_command_uses_repo_status_script(self):
+    def test_harness_status_watch_command_uses_installed_status_command(self):
         command = build_harness_status_watch_command(Path("/repo root"))
 
         self.assertIn("GIT_CEILING_DIRECTORIES=/", command)
         self.assertIn("harness-status", command)
+        self.assertNotIn("/scripts/harness-status", command)
         self.assertIn("--root", command)
         self.assertIn("--compact", command)
         self.assertIn("--watch", command)
@@ -502,6 +689,7 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertIn(f"GIT_CEILING_DIRECTORIES={root.resolve().parent}", seen["command"][-1])
         self.assertIn("--tmux-hud", seen["command"][-1])
         self.assertIn("harness-codex", seen["command"][-1])
+        self.assertNotIn("/scripts/harness-codex", seen["command"][-1])
 
     def test_no_auto_tmux_runs_codex_directly_outside_tmux(self):
         with tempfile.TemporaryDirectory() as d:
@@ -556,6 +744,7 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertIn(f"GIT_CEILING_DIRECTORIES={root.resolve().parent}", seen["command"][-1])
         self.assertIn("--tmux-hud", seen["command"][-1])
         self.assertIn("harness-codex", seen["command"][-1])
+        self.assertNotIn("/scripts/harness-codex", seen["command"][-1])
 
     def test_tmux_bootstrap_command_forwards_model_reasoning_yolo_and_prompt(self):
         command = build_tmux_bootstrap_command(
@@ -572,6 +761,8 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertIn("/repo root", command)
         self.assertIn("HARNESS_CODEX_TMUX_BOOTSTRAPPED=1", command[-1])
         self.assertIn("GIT_CEILING_DIRECTORIES=/", command[-1])
+        self.assertIn("harness-codex", command[-1])
+        self.assertNotIn("/scripts/harness-codex", command[-1])
         self.assertIn("--model gpt-5.5", command[-1])
         self.assertIn("--reasoning high", command[-1])
         self.assertIn("-- hello", command[-1])

@@ -17,6 +17,7 @@ import time
 from .codex_capture_command import capture_codex_session_command
 from .harness_state import (
     PersonalHarnessRuntimeState,
+    STATE_RELATIVE_PATH,
     read_personal_harness_state,
     write_personal_harness_state,
 )
@@ -25,10 +26,16 @@ DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_REASONING = "high"
 DEFAULT_HUD_HEIGHT_LINES = 1
 DEFAULT_HUD_PANE_STYLE = "fg=colour81,bg=colour234"
+HARNESS_CODEX_COMMAND = "harness-codex"
+HARNESS_STATUS_COMMAND = "harness-status"
+AUTO_CHECKPOINT_STARTED_FLOW_ID = "harness-codex-session-started"
+AUTO_CHECKPOINT_COMPLETE_FLOW_ID = "harness-codex-session-complete"
+AUTO_CHECKPOINT_FAILED_FLOW_ID = "harness-codex-session-failed"
 TMUX_BOOTSTRAP_ENV = "HARNESS_CODEX_TMUX_BOOTSTRAPPED"
 HARNESS_TMUX_HUD_OWNER_ENV = "HARNESS_TMUX_HUD_OWNER"
 HARNESS_TMUX_HUD_LEADER_PANE_ENV = "HARNESS_TMUX_HUD_LEADER_PANE"
 HARNESS_TMUX_STATUS_LEFT_ENV = "HARNESS_TMUX_STATUS_LEFT"
+AGENTS_FILE_NAME = "AGENTS.md"
 ANSI_RESET = "\033[0m"
 ANSI_PALETTE = {
     "bold": "\033[1m",
@@ -58,6 +65,70 @@ def _git_ceiling_env(root: Path | str) -> dict[str, str]:
     current = env.get("GIT_CEILING_DIRECTORIES")
     env["GIT_CEILING_DIRECTORIES"] = f"{ceiling}{os.pathsep}{current}" if current else ceiling
     return env
+
+
+def _default_agents_md(root: Path) -> str:
+    return f"""# AGENTS.md
+
+This repository is prepared for `harness-codex`.
+
+## Repository Boundary
+
+- Treat this directory as the project root: `{Path(root).resolve()}`.
+- Keep runtime state under `.harness/`; do not use `.omx/` as product runtime state.
+- Preserve user work. Do not run destructive git commands such as `git reset`, `git checkout`, or `git clean` unless the user explicitly asks.
+
+## Harness Memory
+
+- `.harness/state/personal-harness-state.json` stores the active/closed harness session state.
+- `.harness/replay/replay.jsonl` stores execution and verification evidence.
+- `.harness/flow-checkpoints/checkpoints.jsonl` stores major workflow checkpoints during long Codex sessions.
+- `.harness/memory/hot.md` stores recent selective memory and is the only memory layer to consult by default.
+- `.harness/memory/warm.md` stores older memory for manual retrieval.
+- `.harness/memory/archive.md` stores cold monthly/topic history for manual retrieval.
+- `.harness/candidates/` stores candidate request/response/gate artifacts when iteration is needed.
+- Memory is selective: record only accepted decisions, corrections/lessons from failures, milestones, and verified facts.
+- Do not store secrets, raw logs, full transcripts, speculation, or unresolved discussion in memory.
+
+## Coding Workflow
+
+- Use the smallest workflow that fits the user's request.
+- Let Codex and available skills choose the coding workflow dynamically from the request, repo context, and AGENTS.md.
+- After each major workflow, record evidence and verification with harness flow checkpoints instead of waiting only for final Codex exit.
+- When a major workflow finishes or fails, call `harness-agent --flow-checkpoint ...` from the agent workflow or hook; include `--memory-category`, `--memory-text`, and `--memory-source` only when the outcome is durable repo memory.
+- Users should not need to record checkpoints or rotate memory manually.
+- Prefer tests before behavior changes and verify before claiming completion.
+"""
+
+
+def _has_local_git_repo(root: Path) -> bool:
+    if not root.exists():
+        return False
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        env=_git_ceiling_env(root),
+    )
+    return completed.returncode == 0 and Path(completed.stdout.strip()).resolve() == root.resolve()
+
+
+def prepare_harness_coding_root(root: Path) -> None:
+    root = Path(root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    if not _has_local_git_repo(root):
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=_git_ceiling_env(root))
+    agents_path = root / AGENTS_FILE_NAME
+    if not agents_path.exists():
+        agents_path.write_text(_default_agents_md(root), encoding="utf-8")
+
+
+def _validate_existing_harness_state(root: Path) -> None:
+    state_path = Path(root) / STATE_RELATIVE_PATH
+    if state_path.exists():
+        read_personal_harness_state(root)
 
 
 def _current_harness_version(root: Path) -> str:
@@ -99,7 +170,6 @@ def build_codex_command(
 
 
 def build_harness_status_watch_command(root: Path, *, leader_pane_id: str | None = None) -> str:
-    status_script = _repo_root() / "scripts" / "harness-status"
     command = [
         "env",
         _git_ceiling_assignment(root),
@@ -107,7 +177,7 @@ def build_harness_status_watch_command(root: Path, *, leader_pane_id: str | None
     ]
     if leader_pane_id:
         command.append(f"{HARNESS_TMUX_HUD_LEADER_PANE_ENV}={leader_pane_id}")
-    command.append(str(status_script))
+    command.append(HARNESS_STATUS_COMMAND)
     return (
         f"exec {shlex.join(command)} "
         f"--root {shlex.quote(str(Path(root)))} --compact --watch --color always"
@@ -127,9 +197,8 @@ def build_tmux_bootstrap_command(
     tmux_hud: bool = False,
     prompt_args: Sequence[str] = (),
 ) -> List[str]:
-    launcher = _repo_root() / "scripts" / "harness-codex"
     inner = [
-        str(launcher),
+        HARNESS_CODEX_COMMAND,
         "--root",
         str(Path(root)),
         "--model",
@@ -174,6 +243,7 @@ def mark_harness_session_started(
     status_mode: str = "inline",
 ) -> Path:
     root = Path(root)
+    _validate_existing_harness_state(root)
     metadata = {
         "runtime_owner": "standalone-.harness",
         "llm_backend": "current-codex-agent",
@@ -211,7 +281,7 @@ def close_harness_session(root: Path, *, exit_code: int) -> Path:
         harness_version = previous.harness_version
         model_version = previous.model_version
         variant_id = previous.variant_id
-    except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
+    except FileNotFoundError:
         metadata = {}
         harness_version = _current_harness_version(root)
         model_version = DEFAULT_CODEX_MODEL
@@ -300,7 +370,7 @@ def capture_harness_session_exit(
 def _current_session_metadata(root: Path) -> dict:
     try:
         return dict(read_personal_harness_state(root).metadata)
-    except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {}
 
 
@@ -345,7 +415,7 @@ def _merge_session_metadata(root: Path, additions: dict) -> Path:
         variant_id = previous.variant_id
         active = previous.active
         phase = previous.phase
-    except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
+    except FileNotFoundError:
         metadata = {}
         harness_version = _current_harness_version(root)
         model_version = DEFAULT_CODEX_MODEL
@@ -364,6 +434,33 @@ def _merge_session_metadata(root: Path, additions: dict) -> Path:
             metadata=metadata,
         ),
     )
+
+
+def _record_auto_checkpoint(root: Path, *, flow_id: str, status: str, evidence: str) -> None:
+    from .flow_checkpoint import record_flow_checkpoint
+
+    metadata = _current_session_metadata(root)
+    capture_on_exit = _mapping_or_empty(metadata.get("capture_on_exit"))
+    skill_context = {
+        "orchestrator": "harness-codex",
+        "event": flow_id,
+    }
+    if capture_on_exit:
+        skill_context["capture_on_exit"] = str(capture_on_exit.get("status", "unknown"))
+    try:
+        record_flow_checkpoint(root, flow_id=flow_id, status=status, evidence=evidence, skill_context=skill_context)
+    except Exception as exc:  # auto checkpoint must not mask the Codex process exit code
+        _merge_session_metadata(
+            root,
+            {
+                "auto_checkpoint": {
+                    "status": "failed",
+                    "flow_id": flow_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "recorded_at": time.time(),
+                }
+            },
+        )
 
 
 def render_git_tree_status(root: Path) -> str:
@@ -536,7 +633,7 @@ def _install_tmux_status(root: Path, *, enabled: bool) -> TmuxHarnessStatusInsta
         _tmux(["select-pane", "-t", current_pane])
     if update_status_left:
         status_left = (
-            f"#({_repo_root() / 'scripts' / 'harness-status'} "
+            f"#({HARNESS_STATUS_COMMAND} "
             f"--root {shlex.quote(str(root))} --compact --color never) "
         )
         _tmux(["set-option", "status-left", status_left])
@@ -570,6 +667,7 @@ def run_harness_codex(
     parser.add_argument("--no-auto-tmux", action="store_true", help="Do not auto-start tmux when HUD is enabled outside tmux.")
     parser.add_argument("--quiet-status", action="store_true", help="Do not print the launch-time harness status line.")
     parser.add_argument("--no-capture-on-exit", action="store_true", help="Disable automatic Codex session capture after Codex exits.")
+    parser.add_argument("--no-auto-checkpoint", action="store_true", help="Disable automatic harness-codex lifecycle flow checkpoints.")
     parser.add_argument("--capture-sessions-root", default=None, help="Codex sessions root for capture-on-exit. Defaults to ~/.codex/sessions.")
     parser.add_argument("--capture-task-id", default=None, help="Optional task id for capture-on-exit. Defaults to session id or filename.")
     parser.add_argument("--status-only", action="store_true", help="Print current harness status instead of launching Codex.")
@@ -598,6 +696,17 @@ def run_harness_codex(
         print(shlex.join(command))
         return 0
 
+    try:
+        _validate_existing_harness_state(root)
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        print(
+            f"harness-codex: invalid existing harness state at {root / STATE_RELATIVE_PATH}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    prepare_harness_coding_root(root)
+
     tmux_hud_requested = not args.no_tmux_status
     tmux_hud_enabled = (tmux_hud_requested or "TMUX" in os.environ) and not args.no_tmux_status
     if (
@@ -624,6 +733,13 @@ def run_harness_codex(
 
     status_mode = "tmux-hud-pane" if tmux_hud_enabled and "TMUX" in os.environ else "inline"
     mark_harness_session_started(root, model=args.model, reasoning=args.reasoning, yolo=yolo, status_mode=status_mode)
+    if not args.no_auto_checkpoint:
+        _record_auto_checkpoint(
+            root,
+            flow_id=AUTO_CHECKPOINT_STARTED_FLOW_ID,
+            status="started",
+            evidence=f"harness-codex session started model={args.model} reasoning={args.reasoning} yolo={str(yolo).lower()}",
+        )
     if not args.quiet_status:
         print(render_harness_status(root, compact=True, color=sys.stdout.isatty()), flush=True)
     tmux_status_install = _install_tmux_status(root, enabled=tmux_hud_enabled)
@@ -639,6 +755,17 @@ def run_harness_codex(
                 model=args.model,
                 sessions_root=args.capture_sessions_root,
                 task_id=args.capture_task_id,
+            )
+        if not args.no_auto_checkpoint:
+            flow_id = AUTO_CHECKPOINT_COMPLETE_FLOW_ID if exit_code == 0 else AUTO_CHECKPOINT_FAILED_FLOW_ID
+            status = "complete" if exit_code == 0 else "failed"
+            capture_status = _mapping_or_empty(_current_session_metadata(root).get("capture_on_exit")).get("status")
+            capture_fragment = f" capture_on_exit={capture_status}" if capture_status else " capture_on_exit=disabled"
+            _record_auto_checkpoint(
+                root,
+                flow_id=flow_id,
+                status=status,
+                evidence=f"harness-codex session exited exit_code={exit_code}{capture_fragment}",
             )
         close_harness_session(root, exit_code=exit_code)
         _restore_tmux_status(tmux_status_install)
@@ -677,10 +804,16 @@ __all__ = [
     "DEFAULT_HUD_PANE_STYLE",
     "DEFAULT_HUD_HEIGHT_LINES",
     "DEFAULT_REASONING",
+    "HARNESS_CODEX_COMMAND",
+    "HARNESS_STATUS_COMMAND",
+    "AUTO_CHECKPOINT_STARTED_FLOW_ID",
+    "AUTO_CHECKPOINT_COMPLETE_FLOW_ID",
+    "AUTO_CHECKPOINT_FAILED_FLOW_ID",
     "HARNESS_TMUX_HUD_LEADER_PANE_ENV",
     "HARNESS_TMUX_HUD_OWNER_ENV",
     "HARNESS_TMUX_STATUS_LEFT_ENV",
     "TMUX_BOOTSTRAP_ENV",
+    "prepare_harness_coding_root",
     "build_harness_status_watch_command",
     "build_tmux_bootstrap_command",
     "build_codex_command",

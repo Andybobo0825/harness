@@ -133,6 +133,8 @@ def agent_execution_from_codex_session(
             }
             if command is not None:
                 tool_metadata["command"] = str(command)
+            if is_verification:
+                tool_metadata["is_verification"] = True
             if timestamp is not None:
                 tool_metadata["timestamp"] = timestamp
             tool_calls.append(ToolCallResult(name, exit_code, output, metadata=tool_metadata))

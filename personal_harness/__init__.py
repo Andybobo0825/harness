@@ -18,6 +18,16 @@ from .core import Event, HarnessConfig, HarnessContractError, Hook, Processor, P
 from .eval import CandidateManifest, EvaluationGate, EvaluationResult
 from .evolution import CandidateEdit, CandidateRejection, EvolutionEngine, EvolutionOutcome
 from .execution_controller import AgentExecution, AgentExecutionController, AgentExecutionOutcome, ExecutionEvent, ToolCallResult, VerificationResult
+from .flow_checkpoint import CHECKPOINT_RELATIVE_PATH, record_flow_checkpoint
+from .memory import (
+    ARCHIVE_MEMORY_RELATIVE_PATH,
+    HOT_MEMORY_RELATIVE_PATH,
+    MEMORY_ROOT_RELATIVE_PATH,
+    WARM_MEMORY_RELATIVE_PATH,
+    MemoryEntry,
+    MemorySyncResult,
+    sync_checkpoint_memory,
+)
 from .omx_adapter import OmxCompatibilitySnapshot, snapshot_omx_compatibility
 from .harness_command import CodexGateCommandResult, run_codex_candidate_gate
 from .harness_state import PersonalHarnessRuntimeState, read_personal_harness_state, write_personal_harness_state
@@ -41,6 +51,8 @@ __all__ = [
     "CodexCandidateResponse",
     "CodexCaptureCommandResult",
     "CODEX_SESSIONS_PATH",
+    "CHECKPOINT_RELATIVE_PATH",
+    "ARCHIVE_MEMORY_RELATIVE_PATH",
     "CodexGateCommandResult",
     "CoEvolutionEngine",
     "CoEvolutionOutcome",
@@ -58,7 +70,11 @@ __all__ = [
     "HarnessConfig",
     "HarnessContractError",
     "HarnessVariant",
+    "HOT_MEMORY_RELATIVE_PATH",
     "Hook",
+    "MEMORY_ROOT_RELATIVE_PATH",
+    "MemoryEntry",
+    "MemorySyncResult",
     "OmxCompatibilitySnapshot",
     "PersonalHarnessRuntimeState",
     "Planner",
@@ -70,6 +86,7 @@ __all__ = [
     "ToolCallResult",
     "VariantRouter",
     "VerificationResult",
+    "WARM_MEMORY_RELATIVE_PATH",
     "read_personal_harness_state",
     "run_codex_candidate_gate",
     "run_hook",
@@ -82,5 +99,7 @@ __all__ = [
     "find_latest_codex_session",
     "mark_harness_session_started",
     "record_codex_session",
+    "record_flow_checkpoint",
     "render_harness_status",
+    "sync_checkpoint_memory",
 ]
