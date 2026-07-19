@@ -192,13 +192,14 @@ class TestInstallCommand(unittest.TestCase):
                 )
             )
 
-            clean = doctor_installation(harness_home)
-            journal = harness_home / "install" / "transaction.json"
-            journal.write_text(json.dumps({"backup_id": "20260719T000000Z-aaaaaaaaaaaa"}))
-            incomplete = doctor_installation(harness_home)
-            journal.unlink()
-            hook.write_text("drift")
-            drifted = doctor_installation(harness_home)
+            with patch("personal_harness.install_command._package_version", return_value="1.1.0"):
+                clean = doctor_installation(harness_home)
+                journal = harness_home / "install" / "transaction.json"
+                journal.write_text(json.dumps({"backup_id": "20260719T000000Z-aaaaaaaaaaaa"}))
+                incomplete = doctor_installation(harness_home)
+                journal.unlink()
+                hook.write_text("drift")
+                drifted = doctor_installation(harness_home)
 
         self.assertTrue(clean["ok"], clean)
         self.assertFalse(incomplete["ok"], incomplete)
