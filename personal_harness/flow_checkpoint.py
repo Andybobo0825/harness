@@ -18,6 +18,7 @@ from .memory import MemoryEntry, sync_checkpoint_memory
 from .replay import ReplayStore, TrajectoryRecord
 
 CHECKPOINT_RELATIVE_PATH = Path(".harness") / "flow-checkpoints" / "checkpoints.jsonl"
+FLOW_CHECKPOINT_STATE_LIMIT = 50
 
 
 def record_flow_checkpoint(
@@ -26,6 +27,8 @@ def record_flow_checkpoint(
     flow_id: str,
     status: str,
     evidence: str,
+    session_id: str | None = None,
+    details: Mapping[str, Any] | None = None,
     skill_context: Mapping[str, Any] | None = None,
     replay_refs: Sequence[str] = (),
     candidate_refs: Sequence[str] = (),
@@ -55,6 +58,11 @@ def record_flow_checkpoint(
         "replay_refs": list(replay_refs),
         "candidate_refs": list(candidate_refs),
     }
+    normalized_session_id = str(session_id).strip() if session_id is not None else ""
+    if normalized_session_id:
+        record["session_id"] = normalized_session_id
+    if details:
+        record["details"] = dict(details)
     if sync_memory:
         memory_result = sync_checkpoint_memory(root, entry=memory_entry)
         record["memory"] = {
@@ -114,15 +122,18 @@ def _append_checkpoint_to_state(root: Path, record: Mapping[str, Any]) -> None:
         variant_id = "default"
 
     checkpoints = list(metadata.get("flow_checkpoints", [])) if isinstance(metadata.get("flow_checkpoints"), list) else []
-    checkpoints.append(
-        {
-            "flow_id": record["flow_id"],
-            "status": record["status"],
-            "created_at": record["created_at"],
-            "path": str(CHECKPOINT_RELATIVE_PATH),
-        }
-    )
-    metadata["flow_checkpoints"] = checkpoints
+    summary = {
+        "flow_id": record["flow_id"],
+        "status": record["status"],
+        "created_at": record["created_at"],
+        "path": str(CHECKPOINT_RELATIVE_PATH),
+    }
+    if record.get("session_id"):
+        summary["session_id"] = record["session_id"]
+    if record.get("details"):
+        summary["details"] = dict(record["details"])
+    checkpoints.append(summary)
+    metadata["flow_checkpoints"] = checkpoints[-FLOW_CHECKPOINT_STATE_LIMIT:]
     write_personal_harness_state(
         root,
         PersonalHarnessRuntimeState(
@@ -139,6 +150,25 @@ def _append_checkpoint_to_state(root: Path, record: Mapping[str, Any]) -> None:
 def _append_checkpoint_to_replay(root: Path, record: Mapping[str, Any]) -> None:
     status = str(record["status"])
     solved = status.lower() in {"complete", "completed", "success", "passed"}
+    checkpoint_payload = {
+        "flow_id": record["flow_id"],
+        "status": status,
+        "evidence": record["evidence"],
+        "git": dict(record["git"]),
+        "skill_context": dict(record["skill_context"]),
+    }
+    checkpoint_metadata = {
+        "record_type": "flow_checkpoint",
+        "status": status,
+        "replay_refs": list(record["replay_refs"]),
+        "candidate_refs": list(record["candidate_refs"]),
+    }
+    if record.get("session_id"):
+        checkpoint_payload["session_id"] = record["session_id"]
+        checkpoint_metadata["session_id"] = record["session_id"]
+    if record.get("details"):
+        checkpoint_payload["details"] = dict(record["details"])
+        checkpoint_metadata["details"] = dict(record["details"])
     ReplayStore(root / ".harness" / "replay" / "replay.jsonl").append(
         TrajectoryRecord(
             task_id=f"flow:{record['flow_id']}",
@@ -148,21 +178,10 @@ def _append_checkpoint_to_replay(root: Path, record: Mapping[str, Any]) -> None:
             events=[
                 {
                     "type": "flow_checkpoint",
-                    "payload": {
-                        "flow_id": record["flow_id"],
-                        "status": status,
-                        "evidence": record["evidence"],
-                        "git": dict(record["git"]),
-                        "skill_context": dict(record["skill_context"]),
-                    },
+                    "payload": checkpoint_payload,
                 }
             ],
-            metadata={
-                "record_type": "flow_checkpoint",
-                "status": status,
-                "replay_refs": list(record["replay_refs"]),
-                "candidate_refs": list(record["candidate_refs"]),
-            },
+            metadata=checkpoint_metadata,
         )
     )
 
@@ -174,4 +193,4 @@ def _current_harness_version(root: Path) -> str:
         return "uninitialized"
 
 
-__all__ = ["CHECKPOINT_RELATIVE_PATH", "record_flow_checkpoint"]
+__all__ = ["CHECKPOINT_RELATIVE_PATH", "FLOW_CHECKPOINT_STATE_LIMIT", "record_flow_checkpoint"]

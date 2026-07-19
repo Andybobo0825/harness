@@ -87,6 +87,58 @@ class TestFlowCheckpoint(unittest.TestCase):
         self.assertEqual(record["git"]["summary"], "git:no-repo")
         self.assertEqual(record["status"], "complete")
 
+    def test_record_flow_checkpoint_persists_session_id_and_failure_details(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            path = record_flow_checkpoint(
+                root,
+                flow_id="capture-failed",
+                status="failed",
+                evidence="capture failed after Codex exit",
+                session_id="harness-session-123",
+                details={
+                    "capture_on_exit": "failed",
+                    "capture_error": "FileNotFoundError: no session JSONL",
+                },
+            )
+
+            checkpoint = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+            state = json.loads((root / ".harness" / "state" / "personal-harness-state.json").read_text(encoding="utf-8"))
+            [replay_record] = list(ReplayStore(root / ".harness" / "replay" / "replay.jsonl").read_all())
+
+        self.assertEqual(checkpoint["session_id"], "harness-session-123")
+        self.assertEqual(checkpoint["details"]["capture_error"], "FileNotFoundError: no session JSONL")
+        self.assertEqual(state["metadata"]["flow_checkpoints"][-1]["session_id"], "harness-session-123")
+        self.assertEqual(
+            state["metadata"]["flow_checkpoints"][-1]["details"]["capture_error"],
+            "FileNotFoundError: no session JSONL",
+        )
+        self.assertEqual(replay_record.events[0]["payload"]["session_id"], "harness-session-123")
+        self.assertEqual(replay_record.metadata["details"]["capture_on_exit"], "failed")
+
+    def test_flow_checkpoint_state_summary_keeps_only_latest_fifty(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            for index in range(55):
+                path = record_flow_checkpoint(
+                    root,
+                    flow_id=f"flow-{index}",
+                    status="complete",
+                    evidence=f"evidence-{index}",
+                    include_diff_stat=False,
+                )
+
+            checkpoint_lines = path.read_text(encoding="utf-8").splitlines()
+            state = json.loads((root / ".harness" / "state" / "personal-harness-state.json").read_text(encoding="utf-8"))
+            summaries = state["metadata"]["flow_checkpoints"]
+
+        self.assertEqual(len(checkpoint_lines), 55)
+        self.assertEqual(len(summaries), 50)
+        self.assertEqual(summaries[0]["flow_id"], "flow-5")
+        self.assertEqual(summaries[-1]["flow_id"], "flow-54")
+
     def test_record_flow_checkpoint_can_sync_durable_memory_entry(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -97,7 +149,6 @@ class TestFlowCheckpoint(unittest.TestCase):
                 status="complete",
                 evidence="python3 -m unittest -v passed",
                 memory_entry={
-                    "date": "2026-07-04",
                     "category": "correction",
                     "text": "TODO_FILE must be read at runtime, not import time.",
                     "source": "flow:todo-cli",

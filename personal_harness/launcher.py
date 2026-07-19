@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import sys
 import time
+from uuid import uuid4
 
 from .codex_capture_command import capture_codex_session_command
 from .harness_state import (
@@ -248,6 +249,7 @@ def mark_harness_session_started(
         "runtime_owner": "standalone-.harness",
         "llm_backend": "current-codex-agent",
         "launch": {
+            "session_id": uuid4().hex,
             "model": model,
             "reasoning": reasoning,
             "yolo": yolo,
@@ -441,14 +443,30 @@ def _record_auto_checkpoint(root: Path, *, flow_id: str, status: str, evidence: 
 
     metadata = _current_session_metadata(root)
     capture_on_exit = _mapping_or_empty(metadata.get("capture_on_exit"))
+    launch = _mapping_or_empty(metadata.get("launch"))
+    session_id = str(launch.get("session_id") or "").strip() or None
     skill_context = {
         "orchestrator": "harness-codex",
         "event": flow_id,
     }
+    details = {}
     if capture_on_exit:
-        skill_context["capture_on_exit"] = str(capture_on_exit.get("status", "unknown"))
+        capture_status = str(capture_on_exit.get("status", "unknown"))
+        skill_context["capture_on_exit"] = capture_status
+        details["capture_on_exit"] = capture_status
+        capture_error = capture_on_exit.get("error")
+        if capture_error:
+            details["capture_error"] = str(capture_error)
     try:
-        record_flow_checkpoint(root, flow_id=flow_id, status=status, evidence=evidence, skill_context=skill_context)
+        record_flow_checkpoint(
+            root,
+            flow_id=flow_id,
+            status=status,
+            evidence=evidence,
+            session_id=session_id,
+            details=details,
+            skill_context=skill_context,
+        )
     except Exception as exc:  # auto checkpoint must not mask the Codex process exit code
         _merge_session_metadata(
             root,

@@ -115,9 +115,14 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertEqual(started["metadata"]["launch"]["model"], "gpt-5.5")
         self.assertEqual(started["metadata"]["launch"]["reasoning"], "high")
         self.assertTrue(started["metadata"]["launch"]["yolo"])
+        self.assertRegex(started["metadata"]["launch"]["session_id"], r"^[0-9a-f]{32}$")
         self.assertFalse(closed["active"])
         self.assertEqual(closed["phase"], "closed")
         self.assertEqual(closed["metadata"]["exit_code"], 0)
+        self.assertEqual(
+            closed["metadata"]["launch"]["session_id"],
+            started["metadata"]["launch"]["session_id"],
+        )
 
     def test_session_lifecycle_preserves_malformed_state(self):
         with tempfile.TemporaryDirectory() as d:
@@ -359,7 +364,47 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertEqual(flow_ids, ["harness-codex-session-started", "harness-codex-session-complete"])
         self.assertEqual(checkpoints[-1]["status"], "complete")
         self.assertEqual(checkpoints[-1]["skill_context"]["orchestrator"], "harness-codex")
+        self.assertRegex(checkpoints[0]["session_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(checkpoints[0]["session_id"], checkpoints[1]["session_id"])
         self.assertEqual(final_state["metadata"]["flow_checkpoints"][-1]["flow_id"], "harness-codex-session-complete")
+        self.assertEqual(
+            final_state["metadata"]["flow_checkpoints"][-1]["session_id"],
+            checkpoints[-1]["session_id"],
+        )
+
+    def test_harness_codex_persists_capture_failure_in_lifecycle_checkpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            empty_sessions = root / "empty-sessions"
+            empty_sessions.mkdir()
+
+            exit_code = run_harness_codex(
+                [
+                    "--root",
+                    str(root),
+                    "--no-tmux-status",
+                    "--quiet-status",
+                    "--capture-sessions-root",
+                    str(empty_sessions),
+                    "--",
+                    "hello",
+                ],
+                runner=lambda command: subprocess.CompletedProcess(command, 0),
+            )
+
+            checkpoints = [
+                json.loads(line)
+                for line in (root / ".harness" / "flow-checkpoints" / "checkpoints.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            final_state = json.loads((root / ".harness" / "state" / "personal-harness-state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(checkpoints[-1]["details"]["capture_on_exit"], "failed")
+        self.assertIn("FileNotFoundError", checkpoints[-1]["details"]["capture_error"])
+        self.assertEqual(
+            final_state["metadata"]["flow_checkpoints"][-1]["details"]["capture_error"],
+            checkpoints[-1]["details"]["capture_error"],
+        )
 
     def test_harness_codex_records_automatic_failed_checkpoint(self):
         with tempfile.TemporaryDirectory() as d:
