@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+release_dir=${1:?usage: smoke-harness-release RELEASE_DIRECTORY [WORK_DIRECTORY]}
+work_root=${2:-"${RUNNER_TEMP:-/tmp}/harness-release-e2e"}
+python_executable=${PYTHON:-python3}
+case "$work_root" in
+  ""|"/") echo "refusing unsafe smoke work directory: $work_root" >&2; exit 2 ;;
+esac
+release_dir=$(cd "$release_dir" && pwd)
+rm -rf "$work_root"
+mkdir -p "$work_root/home/.codex" "$work_root/npm" "$work_root/project/.harness/state"
+
+wheel=$(find "$release_dir" -maxdepth 1 -name 'personal_harness-*-py3-none-any.whl' -print -quit)
+test -n "$wheel"
+python_user_base="$work_root/python-user"
+PYTHONUSERBASE="$python_user_base" "$python_executable" -m pip install --user --force-reinstall "$wheel"
+harness_cli="$python_user_base/bin/harness"
+test -x "$harness_cli"
+
+cat > "$work_root/project/.harness/state/personal-harness-state.json" <<'JSON'
+{"schema_version":"personal-harness-state/v1","active":false,"harness_version":"v1","model_version":"gpt-5.5","variant_id":"default","phase":"closed","metadata":{},"updated_at":1.0}
+JSON
+
+(
+  cd "$work_root"
+  export HOME="$work_root/home"
+  export CODEX_HOME="$work_root/home/.codex"
+  export HARNESS_HOME="$work_root/harness-home"
+  export NPM_CONFIG_PREFIX="$work_root/npm"
+  export PYTHONUSERBASE="$python_user_base"
+  export PATH="$python_user_base/bin:$work_root/npm/bin:$PATH"
+  "$harness_cli" install \
+    --release-manifest "$release_dir/harness-release.json" \
+    --wheel "$wheel" \
+    --project-root "$work_root/project"
+  "$harness_cli" doctor --json
+)
+
+test ! -e "$work_root/harness-home/install/transaction.json"
+"$python_executable" - "$work_root/harness-home/logs/transactions.jsonl" <<'PY'
+import json, sys
+records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert records[-1]["status"] == "committed", records
+PY

@@ -13,6 +13,112 @@ def _write_jsonl(path: Path, records):
 
 
 class TestCodexCapture(unittest.TestCase):
+    def test_parses_custom_exec_call_and_output_as_verification(self):
+        with tempfile.TemporaryDirectory() as d:
+            session_path = Path(d) / "session.jsonl"
+            _write_jsonl(
+                session_path,
+                [
+                    {"type": "session_meta", "payload": {"id": "sess-custom"}},
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "call_id": "call-custom",
+                            "name": "exec",
+                            "input": (
+                                'const r = await tools.exec_command({cmd:"python3 -m unittest '
+                                'tests.test_codex_capture -v",workdir:"/repo"}); text(r.output)'
+                            ),
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": "call-custom",
+                            "output": [
+                                {"type": "input_text", "text": "Script completed\nWall time: 0.1 seconds\nOutput:\n"},
+                                {"type": "input_text", "text": "Ran 1 test\n\nOK\n"},
+                            ],
+                        },
+                    },
+                ],
+            )
+
+            execution = agent_execution_from_codex_session(session_path, task_id="custom-capture")
+
+        self.assertEqual([event.event_type for event in execution.events], ["tool_call", "tool_result", "verification_result"])
+        self.assertEqual(execution.metadata["tool_call_count"], 1)
+        self.assertEqual(execution.tool_calls[0].name, "exec")
+        self.assertEqual(execution.tool_calls[0].exit_code, 0)
+        self.assertEqual(execution.tool_calls[0].metadata["exit_code_source"], "tool_output")
+        self.assertEqual(execution.verification_results[0].exit_code, 0)
+
+    def test_parses_custom_exec_failure_status(self):
+        with tempfile.TemporaryDirectory() as d:
+            session_path = Path(d) / "session.jsonl"
+            _write_jsonl(
+                session_path,
+                [
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "call_id": "call-failed",
+                            "name": "exec",
+                            "input": 'const r = await tools.exec_command({cmd:"pytest tests"}); text(r.output)',
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": "call-failed",
+                            "output": [{"type": "input_text", "text": "Script failed\nOutput:\n1 failed\n"}],
+                        },
+                    },
+                ],
+            )
+
+            execution = agent_execution_from_codex_session(session_path)
+
+        self.assertEqual(execution.tool_calls[0].exit_code, 1)
+        self.assertEqual(execution.tool_calls[0].metadata["exit_code_source"], "tool_output")
+        self.assertEqual(execution.verification_results[0].exit_code, 1)
+
+    def test_custom_apply_patch_is_counted_without_becoming_verification(self):
+        with tempfile.TemporaryDirectory() as d:
+            session_path = Path(d) / "session.jsonl"
+            _write_jsonl(
+                session_path,
+                [
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "call_id": "call-patch",
+                            "name": "apply_patch",
+                            "input": "*** Begin Patch\n*** End Patch",
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": "call-patch",
+                            "output": [{"type": "input_text", "text": "Exit code: 0\n"}],
+                        },
+                    },
+                ],
+            )
+
+            execution = agent_execution_from_codex_session(session_path)
+
+        self.assertEqual(execution.metadata["tool_call_count"], 1)
+        self.assertEqual(execution.tool_calls[0].name, "apply_patch")
+        self.assertEqual(execution.verification_results, ())
+
     def test_parses_session_jsonl_into_ordered_agent_execution(self):
         with tempfile.TemporaryDirectory() as d:
             session_path = Path(d) / "session.jsonl"

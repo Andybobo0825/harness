@@ -5,3 +5,6 @@ __pycache__/
 .harness/
 .omx/
 tmp/
+build/
+dist/
+*.egg-info/

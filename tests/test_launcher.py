@@ -89,13 +89,13 @@ def _agent_execution_records(root: Path):
 
 
 class TestHarnessLauncher(unittest.TestCase):
-    def test_build_codex_command_defaults_to_gpt55_high_yolo(self):
+    def test_build_codex_command_defaults_to_gpt56_sol_medium_yolo(self):
         command = build_codex_command(Path("/repo"), prompt_args=["修測試"])
 
         self.assertEqual(command[:3], ["env", "GIT_CEILING_DIRECTORIES=/", "codex"])
         self.assertIn("--model", command)
-        self.assertIn("gpt-5.5", command)
-        self.assertIn('model_reasoning_effort="high"', command)
+        self.assertIn("gpt-5.6-sol", command)
+        self.assertIn('model_reasoning_effort="medium"', command)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("-C", command)
         self.assertIn("/repo", command)
@@ -115,9 +115,14 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertEqual(started["metadata"]["launch"]["model"], "gpt-5.5")
         self.assertEqual(started["metadata"]["launch"]["reasoning"], "high")
         self.assertTrue(started["metadata"]["launch"]["yolo"])
+        self.assertRegex(started["metadata"]["launch"]["session_id"], r"^[0-9a-f]{32}$")
         self.assertFalse(closed["active"])
         self.assertEqual(closed["phase"], "closed")
         self.assertEqual(closed["metadata"]["exit_code"], 0)
+        self.assertEqual(
+            closed["metadata"]["launch"]["session_id"],
+            started["metadata"]["launch"]["session_id"],
+        )
 
     def test_session_lifecycle_preserves_malformed_state(self):
         with tempfile.TemporaryDirectory() as d:
@@ -238,7 +243,7 @@ class TestHarnessLauncher(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("[harness] active", stdout.getvalue())
-        self.assertIn("gpt-5.5 high", stdout.getvalue())
+        self.assertIn("gpt-5.6-sol medium", stdout.getvalue())
         self.assertTrue(seen["state_during_run"]["active"])
         self.assertEqual(seen["state_during_run"]["metadata"]["status"]["mode"], "inline")
         self.assertEqual(final_state["phase"], "closed")
@@ -359,7 +364,47 @@ class TestHarnessLauncher(unittest.TestCase):
         self.assertEqual(flow_ids, ["harness-codex-session-started", "harness-codex-session-complete"])
         self.assertEqual(checkpoints[-1]["status"], "complete")
         self.assertEqual(checkpoints[-1]["skill_context"]["orchestrator"], "harness-codex")
+        self.assertRegex(checkpoints[0]["session_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(checkpoints[0]["session_id"], checkpoints[1]["session_id"])
         self.assertEqual(final_state["metadata"]["flow_checkpoints"][-1]["flow_id"], "harness-codex-session-complete")
+        self.assertEqual(
+            final_state["metadata"]["flow_checkpoints"][-1]["session_id"],
+            checkpoints[-1]["session_id"],
+        )
+
+    def test_harness_codex_persists_capture_failure_in_lifecycle_checkpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            empty_sessions = root / "empty-sessions"
+            empty_sessions.mkdir()
+
+            exit_code = run_harness_codex(
+                [
+                    "--root",
+                    str(root),
+                    "--no-tmux-status",
+                    "--quiet-status",
+                    "--capture-sessions-root",
+                    str(empty_sessions),
+                    "--",
+                    "hello",
+                ],
+                runner=lambda command: subprocess.CompletedProcess(command, 0),
+            )
+
+            checkpoints = [
+                json.loads(line)
+                for line in (root / ".harness" / "flow-checkpoints" / "checkpoints.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            final_state = json.loads((root / ".harness" / "state" / "personal-harness-state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(checkpoints[-1]["details"]["capture_on_exit"], "failed")
+        self.assertIn("FileNotFoundError", checkpoints[-1]["details"]["capture_error"])
+        self.assertEqual(
+            final_state["metadata"]["flow_checkpoints"][-1]["details"]["capture_error"],
+            checkpoints[-1]["details"]["capture_error"],
+        )
 
     def test_harness_codex_records_automatic_failed_checkpoint(self):
         with tempfile.TemporaryDirectory() as d:
@@ -723,7 +768,8 @@ class TestHarnessLauncher(unittest.TestCase):
                     exit_code = run_harness_codex(["--root", str(root), "--dry-run"], runner=fail_runner)
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("codex --model gpt-5.5", stdout.getvalue())
+        self.assertIn("codex --model gpt-5.6-sol", stdout.getvalue())
+        self.assertIn('model_reasoning_effort="medium"', stdout.getvalue())
         self.assertNotIn("tmux new-session", stdout.getvalue())
 
     def test_non_tmux_harness_codex_bootstraps_tmux_when_hud_opted_in(self):

@@ -24,6 +24,10 @@ _EXIT_CODE_PATTERNS = (
     re.compile(r"Process exited with code\s+(-?\d+)"),
     re.compile(r"Exit code:\s*(-?\d+)"),
 )
+_CUSTOM_COMMAND_PATTERN = re.compile(
+    r"\b(?:cmd|command)\s*:\s*(?P<quote>[\"'`])(?P<value>(?:\\.|(?!(?P=quote)).)*)(?P=quote)",
+    re.DOTALL,
+)
 _DIRECT_VERIFICATION_TOOLS = {
     "pytest",
     "unittest",
@@ -91,11 +95,16 @@ def agent_execution_from_codex_session(
             )
             continue
 
-        if payload_type == "function_call":
+        if payload_type in {"function_call", "custom_tool_call"}:
             call_id = str(payload.get("call_id") or payload.get("id") or f"call-{line_number}")
-            arguments = _parse_arguments(payload.get("arguments"))
+            raw_arguments = payload.get("arguments") if payload_type == "function_call" else payload.get("input")
+            arguments = _parse_arguments(raw_arguments)
             name = str(payload.get("name") or "unknown")
-            command = _command_from_arguments(arguments)
+            command = (
+                _command_from_arguments(arguments)
+                if payload_type == "function_call"
+                else _command_from_custom_input(raw_arguments)
+            )
             pending_calls[call_id] = {
                 "name": name,
                 "arguments": arguments,
@@ -118,9 +127,9 @@ def agent_execution_from_codex_session(
             )
             continue
 
-        if payload_type == "function_call_output":
+        if payload_type in {"function_call_output", "custom_tool_call_output"}:
             call_id = str(payload.get("call_id") or f"call-{line_number}")
-            output = _string_or_empty(payload.get("output"))
+            output = _output_text(payload.get("output"))
             call = pending_calls.get(call_id, {})
             name = str(call.get("name") or "unknown")
             command = call.get("command")
@@ -326,11 +335,40 @@ def _command_from_arguments(arguments: Any) -> str | None:
     return None
 
 
+def _command_from_custom_input(custom_input: Any) -> str | None:
+    if not isinstance(custom_input, str):
+        return None
+    matches = list(_CUSTOM_COMMAND_PATTERN.finditer(custom_input))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    return _decode_js_string(match.group("value"))
+
+
+def _decode_js_string(value: str) -> str:
+    escapes = {
+        "\\": "\\",
+        '"': '"',
+        "'": "'",
+        "`": "`",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "b": "\b",
+        "f": "\f",
+        "/": "/",
+    }
+    return re.sub(r"\\(.)", lambda match: escapes.get(match.group(1), match.group(1)), value, flags=re.DOTALL)
+
+
 def _parse_exit_code(output: str) -> tuple[int, str]:
     for pattern in _EXIT_CODE_PATTERNS:
         match = pattern.search(output)
         if match is not None:
             return int(match.group(1)), "tool_output"
+    script_status = re.search(r"(?:^|\n)Script (completed|failed)\b", output)
+    if script_status is not None:
+        return (0 if script_status.group(1) == "completed" else 1), "tool_output"
     return 0, "output_event_completed"
 
 
@@ -421,6 +459,12 @@ def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
 
 def _string_or_empty(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _output_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return _content_text(value)
 
 
 def _event_metadata(timestamp: Any, line_number: int) -> Mapping[str, Any]:

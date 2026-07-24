@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import sys
 import time
+from uuid import uuid4
 
 from .codex_capture_command import capture_codex_session_command
 from .harness_state import (
@@ -22,8 +23,8 @@ from .harness_state import (
     write_personal_harness_state,
 )
 
-DEFAULT_CODEX_MODEL = "gpt-5.5"
-DEFAULT_REASONING = "high"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_REASONING = "medium"
 DEFAULT_HUD_HEIGHT_LINES = 1
 DEFAULT_HUD_PANE_STYLE = "fg=colour81,bg=colour234"
 HARNESS_CODEX_COMMAND = "harness-codex"
@@ -248,6 +249,7 @@ def mark_harness_session_started(
         "runtime_owner": "standalone-.harness",
         "llm_backend": "current-codex-agent",
         "launch": {
+            "session_id": uuid4().hex,
             "model": model,
             "reasoning": reasoning,
             "yolo": yolo,
@@ -441,14 +443,30 @@ def _record_auto_checkpoint(root: Path, *, flow_id: str, status: str, evidence: 
 
     metadata = _current_session_metadata(root)
     capture_on_exit = _mapping_or_empty(metadata.get("capture_on_exit"))
+    launch = _mapping_or_empty(metadata.get("launch"))
+    session_id = str(launch.get("session_id") or "").strip() or None
     skill_context = {
         "orchestrator": "harness-codex",
         "event": flow_id,
     }
+    details = {}
     if capture_on_exit:
-        skill_context["capture_on_exit"] = str(capture_on_exit.get("status", "unknown"))
+        capture_status = str(capture_on_exit.get("status", "unknown"))
+        skill_context["capture_on_exit"] = capture_status
+        details["capture_on_exit"] = capture_status
+        capture_error = capture_on_exit.get("error")
+        if capture_error:
+            details["capture_error"] = str(capture_error)
     try:
-        record_flow_checkpoint(root, flow_id=flow_id, status=status, evidence=evidence, skill_context=skill_context)
+        record_flow_checkpoint(
+            root,
+            flow_id=flow_id,
+            status=status,
+            evidence=evidence,
+            session_id=session_id,
+            details=details,
+            skill_context=skill_context,
+        )
     except Exception as exc:  # auto checkpoint must not mask the Codex process exit code
         _merge_session_metadata(
             root,
@@ -659,8 +677,8 @@ def run_harness_codex(
 ) -> int:
     parser = argparse.ArgumentParser(description="Launch Codex inside the standalone harness runtime.")
     parser.add_argument("--root", default=".", help="Project root that owns the .harness runtime.")
-    parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Codex model to launch. Default: gpt-5.5.")
-    parser.add_argument("--reasoning", default=DEFAULT_REASONING, help="Codex reasoning effort. Default: high.")
+    parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Codex model to launch. Default: gpt-5.6-sol.")
+    parser.add_argument("--reasoning", default=DEFAULT_REASONING, help="Codex reasoning effort. Default: medium.")
     parser.add_argument("--no-yolo", action="store_true", help="Disable YOLO mode; omit bypass-approvals/sandbox flag.")
     parser.add_argument("--tmux-hud", action="store_true", help="Enable tmux HUD pane/status integration. Enabled by default.")
     parser.add_argument("--no-tmux-status", action="store_true", help="Disable tmux HUD pane/status integration.")

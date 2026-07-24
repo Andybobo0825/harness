@@ -4,11 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personal-harness"
-version = "1.0.0"
+version = "1.1.0"
 description = "Standalone harness-codex runtime and feedback loop tools."
 requires-python = ">=3.11"
 
+[project.urls]
+Homepage = "https://github.com/Andybobo0825/harness"
+Repository = "https://github.com/Andybobo0825/harness"
+
 [project.scripts]
+harness = "personal_harness.install_command:main"
 harness-codex = "personal_harness.launcher:run_harness_codex"
 harness-status = "personal_harness.launcher:status_main"
 harness-agent = "personal_harness.harness_command:main"

@@ -2,7 +2,7 @@
 
 Start Codex as a repo-scoped coding agent with automatic checkpoints, selective memory, HUD status, and replayable execution evidence.
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-brightgreen)](https://www.python.org/)
 [![Runtime](https://img.shields.io/badge/runtime-.harness%2F-6f42c1)](#what-harness-writes)
 
@@ -17,7 +17,7 @@ Harness is a thin product layer for day-to-day Codex coding sessions:
 - `harness-status` prints the current harness session state for humans, scripts, or HUD panes.
 - `harness-capture-codex` converts Codex session JSONL into `.harness` replay/state records.
 
-OMX can still be useful while developing this repo, but it is not the product runtime. Harness-owned state lives under `.harness/` in the target repository.
+Harness owns its repo runtime under `.harness/` and manages one verified OMX compatibility version globally for Codex hook delivery. OMX workflow state remains separate from Harness project state.
 
 ## Why Use It
 
@@ -38,14 +38,20 @@ If you only want plain Codex with no persistent repo memory or replay trail, you
 Requirements:
 
 - Python 3.11+
+- Node.js 20+ and npm
 - OpenAI Codex CLI installed and authenticated
 - `tmux` if you want the recommended HUD pane experience
 
-Install from this repository:
+Bootstrap from the immutable `v1.1.0` GitHub Release, then run the transactional installer:
 
 ```bash
-python3 -m pip install git+https://github.com/Andybobo0825/harness.git
+python3 -m pip install --user \
+  https://github.com/Andybobo0825/harness/releases/download/v1.1.0/personal_harness-1.1.0-py3-none-any.whl
+export PATH="$(python3 -m site --user-base)/bin:$PATH"
+harness install --version 1.1.0
 ```
+
+Run install, update, doctor, recovery, and rollback with the same base Python interpreter; Harness rejects virtual-environment-scoped updates so a shared manifest cannot point at a project-only installation. Harness verifies the wheel checksum and pinned OMX tarball SRI, applies a preimage/postimage-verified native-hook overlay, refreshes Codex hooks, migrates known state, and runs post-install smoke tests. It never installs from `main`.
 
 For local development from a clone:
 
@@ -56,10 +62,32 @@ python3 -m pip install -e .
 Verify the installed commands:
 
 ```bash
+harness version --json
+harness doctor --json
 harness-codex --help
 harness-agent --help
 harness-status --help
 harness-capture-codex --help
+```
+
+Upgrade to the latest stable GitHub Release:
+
+```bash
+harness update
+harness doctor
+```
+
+Rollback to the most recent pre-update backup:
+
+```bash
+harness rollback
+```
+
+If a process or machine stops during an update, `harness doctor` reports the durable transaction journal. Recover the journal's verified backup before retrying:
+
+```bash
+harness recover
+harness doctor
 ```
 
 ## Quick Start
@@ -70,6 +98,8 @@ Create or enter a coding repo, then start Harness:
 mkdir my-coding-repo
 harness-codex --root my-coding-repo
 ```
+
+The default launch profile is `gpt-5.6-sol` with `medium` reasoning. Override it per session with `--model` and `--reasoning` when needed.
 
 Before Codex starts, Harness will:
 
@@ -161,10 +191,26 @@ Harness writes runtime state only inside the target repo:
 
 The source repo is not required at runtime after installation. Installed CLI commands call package entrypoints, not local `scripts/...` paths.
 
+Global installation metadata is separate from every project:
+
+```text
+~/.local/share/harness-codex/install/manifest.json
+~/.local/share/harness-codex/install/transaction.json  # only while recovery is required
+~/.local/share/harness-codex/releases/
+~/.local/share/harness-codex/backups/
+~/.local/share/harness-codex/logs/transactions.jsonl
+```
+
 ## Command Reference
 
 | Command | Purpose |
 | --- | --- |
+| `harness install --version 1.1.0` | Install an immutable GitHub Release and all compatible runtime changes |
+| `harness update` | Update to the latest stable GitHub Release; never read `main` |
+| `harness doctor` | Verify wheel, OMX overlay, and Codex hook checksums |
+| `harness rollback` | Restore a previous transactional backup |
+| `harness recover` | Restore the backup named by an interrupted transaction journal |
+| `harness version` | Show package and committed installation versions |
 | `harness-codex --root .` | Launch Codex inside the Harness runtime |
 | `harness-codex --root . --dry-run` | Print the Codex launch command without running it |
 | `harness-codex --root . --no-capture-on-exit` | Disable final transcript capture |
@@ -183,6 +229,11 @@ Harness is designed to observe and record before it changes strategy:
 - no `.omx/` product runtime ownership
 - no memory writes unless the entry passes category and sensitive-content checks
 - no cross-repo session capture when `cwd` and launch time do not match
+- no update from a Git branch, draft release, prerelease, or checksum-mismatched artifact
+- automatic rollback when OMX setup, state migration, or any post-install smoke test fails
+- durable transaction phases and recovery instructions after process or machine interruption
+
+Lifecycle checkpoints carry a unique session ID and persist detailed capture failures. They are compact JSONL evidence records, not prompt text that is automatically loaded into Codex context, so adding the session ID does not make sessions materially longer or consume tokens unless a workflow explicitly reads those files.
 
 `harness-codex` can launch Codex in YOLO mode because that is the intended coding-agent path here. Use it only in repositories and environments where that level of local authority is acceptable.
 
@@ -212,12 +263,12 @@ git diff --check
 
 ## Current Boundaries
 
-Version `1.0.0` is a local/global CLI release, not a hosted service.
+Version `1.1.0` is a versioned global CLI and release installer, not a hosted service.
 
 Current intentional limits:
 
 - no real GRPO or model fine-tuning yet
-- no PyPI release workflow yet
+- GitHub Releases are the only production update channel; PyPI is not an update source
 - no automatic interactive candidate rewrite loop beyond the file-backed handoff
 - variant routing and AEGIS candidate forking are present as seams, not a complete autonomous product loop
 
