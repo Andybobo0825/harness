@@ -89,13 +89,13 @@ def _agent_execution_records(root: Path):
 
 
 class TestHarnessLauncher(unittest.TestCase):
-    def test_build_codex_command_defaults_to_gpt55_high_yolo(self):
+    def test_build_codex_command_defaults_to_gpt56_sol_medium_yolo(self):
         command = build_codex_command(Path("/repo"), prompt_args=["修測試"])
 
         self.assertEqual(command[:3], ["env", "GIT_CEILING_DIRECTORIES=/", "codex"])
         self.assertIn("--model", command)
-        self.assertIn("gpt-5.5", command)
-        self.assertIn('model_reasoning_effort="high"', command)
+        self.assertIn("gpt-5.6-sol", command)
+        self.assertIn('model_reasoning_effort="medium"', command)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("-C", command)
         self.assertIn("/repo", command)
@@ -243,7 +243,7 @@ class TestHarnessLauncher(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("[harness] active", stdout.getvalue())
-        self.assertIn("gpt-5.5 high", stdout.getvalue())
+        self.assertIn("gpt-5.6-sol medium", stdout.getvalue())
         self.assertTrue(seen["state_during_run"]["active"])
         self.assertEqual(seen["state_during_run"]["metadata"]["status"]["mode"], "inline")
         self.assertEqual(final_state["phase"], "closed")
@@ -768,7 +768,8 @@ class TestHarnessLauncher(unittest.TestCase):
                     exit_code = run_harness_codex(["--root", str(root), "--dry-run"], runner=fail_runner)
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("codex --model gpt-5.5", stdout.getvalue())
+        self.assertIn("codex --model gpt-5.6-sol", stdout.getvalue())
+        self.assertIn('model_reasoning_effort="medium"', stdout.getvalue())
         self.assertNotIn("tmux new-session", stdout.getvalue())
 
     def test_non_tmux_harness_codex_bootstraps_tmux_when_hud_opted_in(self):

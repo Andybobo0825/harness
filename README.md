@@ -99,6 +99,8 @@ mkdir my-coding-repo
 harness-codex --root my-coding-repo
 ```
 
+The default launch profile is `gpt-5.6-sol` with `medium` reasoning. Override it per session with `--model` and `--reasoning` when needed.
+
 Before Codex starts, Harness will:
 
 - create the target directory if needed

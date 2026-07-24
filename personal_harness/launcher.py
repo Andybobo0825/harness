@@ -23,8 +23,8 @@ from .harness_state import (
     write_personal_harness_state,
 )
 
-DEFAULT_CODEX_MODEL = "gpt-5.5"
-DEFAULT_REASONING = "high"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_REASONING = "medium"
 DEFAULT_HUD_HEIGHT_LINES = 1
 DEFAULT_HUD_PANE_STYLE = "fg=colour81,bg=colour234"
 HARNESS_CODEX_COMMAND = "harness-codex"
@@ -677,8 +677,8 @@ def run_harness_codex(
 ) -> int:
     parser = argparse.ArgumentParser(description="Launch Codex inside the standalone harness runtime.")
     parser.add_argument("--root", default=".", help="Project root that owns the .harness runtime.")
-    parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Codex model to launch. Default: gpt-5.5.")
-    parser.add_argument("--reasoning", default=DEFAULT_REASONING, help="Codex reasoning effort. Default: high.")
+    parser.add_argument("--model", default=DEFAULT_CODEX_MODEL, help="Codex model to launch. Default: gpt-5.6-sol.")
+    parser.add_argument("--reasoning", default=DEFAULT_REASONING, help="Codex reasoning effort. Default: medium.")
     parser.add_argument("--no-yolo", action="store_true", help="Disable YOLO mode; omit bypass-approvals/sandbox flag.")
     parser.add_argument("--tmux-hud", action="store_true", help="Enable tmux HUD pane/status integration. Enabled by default.")
     parser.add_argument("--no-tmux-status", action="store_true", help="Disable tmux HUD pane/status integration.")
